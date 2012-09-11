@@ -98,6 +98,31 @@ class qbehaviour_adaptiveweighted_renderer extends qbehaviour_adaptive_renderer
 	return $output;
     }
 
+    /**
+     * Create some information intended to be displayed in the left-hand bar, which summarizes grading
+     * methods. (e.g. "No penalty if incorrect." or "0.30 penalty per guess".)
+     */
+    public function grade_method_details(question_attempt $qa, question_display_options $options) {
+
+        // Get the definition for the active question.
+        $question = $qa->get_question();
+
+        // Since we're providing a percentage, we'll represent the value to two less decimal places
+        // as to maintain the same precision.
+        $penaltydp = max($options->markdp - 2, 0);
+
+        // Get a formatted indication of the incorrect answer penalty.
+        $penalty = format_float($question->penalty * 100, $penaltydp);
+
+        // If the question has no penalty set, show a "no penalty if incorrect" message to the side;
+        // otherwise, display the penalty information.
+        if($question->penalty == 0) {
+            return get_string('nopenalty', 'qbehaviour_adaptiveweighted');
+        } else {
+            return get_string('penaltyinfo', 'qbehaviour_adaptiveweighted', $penalty);
+        }
+    }
+
 	/**
 	* Display the information about the penalty calculations.
 	* @param question_attempt $qa the question attempt.

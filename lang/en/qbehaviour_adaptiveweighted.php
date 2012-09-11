@@ -29,3 +29,6 @@ $string['pluginname'] = 'Weighted adaptive mode';
 
 $string['gradenow'] = 'Grade Me Now!';
 $string['savenow'] = 'Save (without grading)';
+
+$string['penaltyinfo'] = 'Incorrect Answer Penalty: {$a}%';
+$string['nopenalty'] = 'No penalty if incorrect.';
