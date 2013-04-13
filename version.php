@@ -25,8 +25,8 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-$plugin->component = 'qbehaviour_adaptiveweighted';
-$plugin->version   = 2012072200;
+$plugin->component = 'qbehaviour_adaptiveweighted_queued';
+$plugin->version   = 2013040900;
 
 $plugin->requires  = 2011102700;
 

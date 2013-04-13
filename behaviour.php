@@ -30,15 +30,41 @@ defined('MOODLE_INTERNAL') || die();
 require_once($CFG->dirroot.'/question/behaviour/adaptive/behaviour.php');
 
 /**
- * Question behaviour for adaptive mode.
+ * Modified Adaptive Weighted behavior for queued questions (like 
  *
  * This is the old version of interactive mode.
  *
  * @copyright  2009 The Open University
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
+class qbehaviour_adaptiveweighted_queued extends qbehaviour_adaptive
 {
+    const IS_ARCHETYPAL = false;
+
+    /**
+     * Handles any user (student and otherwise) interactions with a question attempt
+     * that uses this behavior.
+     *
+     * This function delegates each action to the appropriate handler subroutine.
+     *
+     * @param question_attempt_pending_step An object describing the data submitted by
+     *    the user during interaction with the function. 
+     */
+    public function process_action(question_attempt_pending_step $pendingstep) {
+
+        //If the pending step is an external update (which occurs when judging is
+        //completed after the attempt is closed), handle it using the process update
+        //function.
+        if($pendingstep->has_behaviour_var('update')) {
+            return $this->process_update($pendingstep);
+        } 
+        //Otherwise, delegate to the parent action handler, which in turn delegates
+        //to the appropriate method below.
+        else {
+            return parent::process_action($pendingstep);
+        }
+    }
+
     /**
      * Perform the actual grading, as part of the submit step.
      * 
@@ -47,25 +73,106 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
      */
     public function process_submit(question_attempt_pending_step $pendingstep) 
     {
-    	//first, call the save event processing code, and get the default question status
+  	    //First, call the save event processing code, and get the default question status.
         $status = $this->process_save($pendingstep);
 
-        //get the response information for the new step
+        //Get the response information for the new step.
         $response = $pendingstep->get_qt_data();
         
-        //if the user's response isn't gradeable (e.g. a non-numeric answer for a numeric quesiton type)
-        //set the state to invalid, and don't penalize the user
-        if (!$this->question->is_gradable_response($response)) 
+        //If the user's response isn't complete,
+        //set the state to invalid, and don't penalize the user.
+        if (!$this->question->is_complete_response($response)) 
         {
-        	//mark the pending response as invalid 
             $pendingstep->set_state(question_state::$invalid);
             
-            //as long as the current attempt state isn't invalid, keep the user's response without grading it  
+            //As long as the current attempt state isn't invalid, keep the user's response without grading it.
             if ($this->qa->get_state() != question_state::$invalid) 
                 $status = question_attempt::KEEP;
             
-            //return the grading status
             return $status;
+        }
+
+        //Add the response to the graing queue, and mark it as "requiring grading".
+        $this->queue_grading($pendingstep, $response);
+
+        //return KEEP, indicating that this response should not be discarded
+        return question_attempt::KEEP;
+    }
+
+    /**
+     * Requests that the given response be graded.
+     */
+    protected function queue_grading($step, $response) {
+    
+        //If the question does not have a queue method, raise a coding exception.
+        if(!method_exists($this->question, 'queue_grading')) {
+            throw new coding_exception('Questions which use queued behaviors must support queue_for_grading. '.get_class($this->question) . ' does not.');
+        }
+
+        //Ask the question to grade the provided response.
+        $task_id = $this->question->queue_grading($response, $this->qa->get_usage_id(), $this->qa->get_slot());
+        $step->set_behaviour_var('_task_id', $task_id);
+        $step->set_state(question_state::$needsgrading);
+
+        //Adjust the question's summary.
+        $step->set_new_response_summary($this->question->summarise_response($response));
+
+    }
+
+
+    public function process_save(question_attempt_pending_step $pendingstep) {
+
+        $status = parent::process_save($pendingstep);
+
+        //Get the task ID of the most recent queued task.
+        $task_id = $this->qa->get_last_behaviour_var('_task_id', -1);
+
+        //If a task is outstanding (>=0) and has been graded...
+        if($task_id >= 0 && $this->question->queued_grading_is_complete($task_id)) {
+
+            //... apply it.
+            $this->apply_queued_grade($pendingstep);
+
+            //... and keep the given step.
+            return question_attempt::KEEP;
+        } 
+        //Otherwise, perform a normal save, and return.
+        else {
+            return $status; 
+        }
+    }
+
+    
+
+    /**
+     * Apply a queued grading operation.
+     *
+     * @param question_attempt_pending_step $pendingstep a partially initialised step
+     *      containing all the information about the action that is being peformed.
+     * @return bool either {@link question_attempt::KEEP}
+     */
+    public function apply_queued_grade(question_attempt_pending_step $pendingstep) {
+
+        //Get the result of the newly-created task.
+        $task_id = $this->qa->get_last_behaviour_var('_task_id', -1);
+        $result = $this->question->get_queued_grading_result($task_id);
+
+        //Import the result of the newly-created task into the pending step.
+        $this->import_queued_grading_result($pendingstep, $result);
+
+        //Mark the given grade as "handled".
+        $pendingstep->set_behaviour_var('_task_id', -1);
+
+        //get the response information for the new step
+        $response = $pendingstep->get_qt_data();
+
+        //if the user's response isn't gradeable (e.g. a non-numeric answer for a numeric quesiton type)
+        //set the state to invalid, and don't penalize the user
+        if (!$this->question->post_process_response_is_gradable($response)) 
+        {
+        	//mark the pending response as invalid 
+            $pendingstep->set_state(question_state::$todo);
+            return;
         }
 
         //get some information about the previous attempt(s):
@@ -86,13 +193,9 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
         $prevbest = $pendingstep->get_fraction();
 
         //if we don't have a prior best score, assume the student has not yet earned any points
-        if (is_null($prevbest)) 
+        if (is_null($prevbest)) {
             $prevbest = 0;
-
-        //if we've recieved the same response twice (possibly due to multiple clicks of the 'check' button)
-        //discard the latter attempt
-        if ($this->question->is_same_response($response, $prevresponse)) 
-            return question_attempt::DISCARD;
+        }
 
         //grade the current response
         list($fraction, $state) = $this->question->grade_response($response);
@@ -104,11 +207,11 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
         $pendingstep->set_fraction(max($prevbest, $adjusted_grade));
         
         //if the previous step was a complete response, then mark this response as complete, as well
-        if ($prevstep->get_state() == question_state::$complete) 
-            $pendingstep->set_state(question_state::$complete);
+        //if ($prevstep->get_state() == question_state::$complete) 
+        //    $pendingstep->set_state(question_state::$complete);
         
         //if the user achieved the correct answer, mark this attempt as complete
-        else if ($state == question_state::$gradedright)
+        if ($state == question_state::$gradedright)
             $pendingstep->set_state(question_state::$complete);
         
         //otherwise, indicate that the question can be continued
@@ -116,15 +219,15 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
             $pendingstep->set_state(question_state::$todo);
 
         
-       //calculate the penalty for the given attempt
-       $lastpenalty = (1 - $fraction) * $this->question->penalty;
+        //calculate the penalty for the given attempt
+        $lastpenalty = (1 - $fraction) * $this->question->penalty;
             
-       //and store it as the most recent penalty
-       $pendingstep->set_behaviour_var('_lastpenalty', $lastpenalty);
+        //and store it as the most recent penalty
+        $pendingstep->set_behaviour_var('_lastpenalty', $lastpenalty);
             
-       //increase the penalty counter for subsequent attempts (if possible ?)
-       //the penalty is equal to the default penalty multiplied by the percent incorrect
-       $sumpenalty = $prevsumpenalty + $lastpenalty;
+        //increase the penalty counter for subsequent attempts (if possible ?)
+        //the penalty is equal to the default penalty multiplied by the percent incorrect
+        $sumpenalty = $prevsumpenalty + $lastpenalty;
             
         //increment the attempt counter
         $pendingstep->set_behaviour_var('_try', $prevtries + 1);
@@ -143,21 +246,36 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
     }
 
     /**
+     * Internal function which imports an array of QT variables (such as the result of a queued grade) 
+     * into a pending attempt step.
+     *
+     * @param question_attempt_pending_step $pendingstep The step to be modified.
+     * @param array $result The array of QT variables to import. Each will be automatically prefixed with a '_'--
+     *    do not prefix them yourself!
+     */
+    protected function import_queued_grading_result(question_attempt_pending_step $pendingstep, array $result) {
+
+        //Import each of the grading results as QT variables.
+        foreach($result as $name => $value) {
+            $pendingstep->set_qt_var('_'.$name, $value); 
+        }
+    
+    }
+
+    /**
      * Process the finish event, which occurs when quizzes are submitted.
      */
     public function process_finish(question_attempt_pending_step $pendingstep) 
     {
     	//if the quiz is already finished, discard the attempt
-        if ($this->qa->get_state()->is_finished()) 
+        if ($this->qa->get_state()->is_finished()) { 
             return question_attempt::DISCARD;
+        }
 
         //get the amount of expended tries, and the previous best score
         $prevtries = $this->qa->get_last_behaviour_var('_try', 0);
         $prevbest = $this->qa->get_fraction();
         
-        //get the running sum of penalties
-        $prevsumpenalty = $this->qa->get_last_behaviour_var('_sumpenalty', 0);
-
         //if the student has no score, assume they've earned no marks
         if (is_null($prevbest)) 
             $prevbest = 0;
@@ -176,49 +294,40 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
         //otherwise, grade the student response
         else 
         {
-
-        	//if the final step is a graded attempt, then this is a regrade:
-        	//we're going to ignore that final grading, and thus won't count its attempt as expended 
-            if ($laststep->has_behaviour_var('_try')) 
+          	//if the final step is a graded attempt, then this is a regrade:
+          	//we're going to ignore that final grading, and thus won't count its attempt as expended 
+            if ($laststep->has_behaviour_var('_try')) {
                 $prevtries -= 1;
+            }
 
-            //grade the given question
-            list($fraction, $state) = $this->question->grade_response($response);
-
-            //and mark one more attempt as expended
-            $pendingstep->set_behaviour_var('_try', $prevtries + 1);
-            
-            //store the raw score for the question
-            $pendingstep->set_behaviour_var('_rawfraction', $fraction);
-            
-            //calculate the penalty for the given attempt
-            $lastpenalty = (1 - $fraction) * $this->question->penalty;
-            
-            //and store it as the most recent penalty
-            $pendingstep->set_behaviour_var('_lastpenalty', $lastpenalty);
-            
-            //increase the penalty counter for subsequent attempts (if possible ?)
-            //the penalty is equal to the default penalty multiplied by the percent incorrect
-            $sumpenalty = $prevsumpenalty + $lastpenalty;
-            
-            //calculate a new sumpenalty
-            $pendingstep->set_behaviour_var('_sumpenalty', $sumpenalty);
-            
-            //and store the response's summary
-            $pendingstep->set_new_response_summary($this->question->summarise_response($response));
+            $this->queue_grading($pendingstep, $response);
         }
-
-        //set the question's state to either finalized, or abandoned, according to the above
-        $pendingstep->set_state($state);
-        
-        //calculate the student's grade, after penalties
-        $adjusted_fraction = $this->adjusted_fraction($fraction, $prevsumpenalty);
-        
-        //and store the student's score
-        $pendingstep->set_fraction(max($prevbest, $adjusted_fraction));
         
         //no matter what, always keep a non-duplicate final submission
         return question_attempt::KEEP;
+    }
+
+    /**
+     * @return int The ID of this question's active task, in the format supplied by the question.
+     * Returns null if no active task exists.
+     */
+    public function get_active_task_id() {
+
+        //Get the ID of the task, or -1 if it does not exist. 
+        // '-1' is the internal code for "no active task".
+        $task_id =  $this->qa->get_last_behaviour_var('_task_id', -1 );
+        return ($task_id < 0) ? null : $task_id;
+
+    }
+
+    /**
+     * Returns the step which should be used to generate specific and general feedback.
+     * 
+     * @return question_attempt_step The step whose values should be used to determine feedback,
+     * or an empty step if no applicable step exists.
+     */
+    public function get_feedback_step() {
+        return $this->qa->get_last_step_with_behaviour_var('_task_id');
     }
     
     /**
@@ -228,6 +337,22 @@ class qbehaviour_adaptiveweighted extends qbehaviour_adaptive
     protected function adjusted_fraction($fraction, $sumpenalty)
     {
     	return max($fraction - $sumpenalty, 0);
+    }
+
+    /**
+     *  
+     */
+    public function get_state_string($show_correctness) {
+
+        //If this question is "in the queue" waiting to be graded,
+        //list it as "waiting to be graded" instead of complete...
+        if($this->qa->get_state() == question_state::$needsgrading) {
+            return get_string('needsgrading', 'qbehaviour_adaptiveweighted_queued');
+        }
+        else {
+            return parent::get_state_string($show_correctness);
+        }   
+
     }
 
 }

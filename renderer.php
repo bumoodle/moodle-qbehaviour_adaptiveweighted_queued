@@ -36,7 +36,7 @@ require_once($CFG->dirroot.'/question/behaviour/adaptive/renderer.php');
  * @copyright  2009 The Open University
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class qbehaviour_adaptiveweighted_renderer extends qbehaviour_adaptive_renderer 
+class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_renderer 
 {
     /**
      * Several behaviours need a submit button, so put the common code here.
@@ -44,41 +44,34 @@ class qbehaviour_adaptiveweighted_renderer extends qbehaviour_adaptive_renderer
      * @param question_display_options $options controls what should and should not be displayed.
      * @return string HTML fragment.
      */
-    protected function submit_button(question_attempt $qa, question_display_options $options, $save_only = false) 
-    {
-	//if save_only is false, this is a real submit button
-	if(!$save_only)
-	{
-		$attributes = 
-		    array
-		    (
-			'type' => 'submit',
-			'id' => $qa->get_behaviour_field_name('submit'),
-			'name' => $qa->get_behaviour_field_name('submit'),
-			'value' => get_string('gradenow', 'qbehaviour_adaptiveweighted'),
-			'alt' => get_string('gradenow', 'qbehaviour_adaptiveweighted'),
-			'class' => 'submit btn gradenow',
-		    );
-	} 
-	//otherwise, it's just a button that saves the student work
-	else
-	{
-		$attributes = 
-		    array
-		    (
-			'type' => 'submit',
-			'id' => $qa->get_behaviour_field_name('save'),
-			'name' => $qa->get_behaviour_field_name('save'),
-			'value' => get_string('savenow', 'qbehaviour_adaptiveweighted'),
-			'alt' => get_string('savenow', 'qbehaviour_adaptiveweighted'),
-			'class' => 'submit btn savenow',
-		    );
+    protected function submit_button(question_attempt $qa, question_display_options $options, $button_name='submit', $button_text=null, $class='', $disabled=false) {
 
-	}
+        //if no button text was provided, then use the default string
+        if($button_text === null) {
+            $button_text = get_string('gradenow', 'qbehaviour_adaptiveweighted');
+        }
+
+
+        //compute the button's attributes
+        $attributes = array
+        (
+            'type' => 'submit',
+            'id' => $qa->get_behaviour_field_name($button_name),
+            'name' => $qa->get_behaviour_field_name($button_name),
+            'value' => $button_text,
+            'alt' => $button_text,
+            'class' => 'submit btn '.$class,
+        );
 
         //if the question is read-only, prevent the button from being clicked
-        if ($options->readonly)
+        if ($options->readonly || $disabled) {
             $attributes['disabled'] = 'disabled';
+        }
+
+        //and add the appropirate colorization
+        if ($disabled) {
+            $attributes['class'] .= ' disabled';
+        }
 
         //generate a new submit button 
         $output = html_writer::empty_tag('input', $attributes);
@@ -86,16 +79,27 @@ class qbehaviour_adaptiveweighted_renderer extends qbehaviour_adaptive_renderer
         //if this question isn't read-only, initialize the submit button routine, which prevents multiple submissions
         if (!$options->readonly) 
             $this->page->requires->js_init_call('M.core_question_engine.init_submit_button', array($attributes['id'], $qa->get_slot()));
-        
+
+        //finally, return the rendered submit button
         return $output;
     }
 
     public function controls(question_attempt $qa, question_display_options $options) 
     {
-        $output = $this->submit_button($qa, $options);
-        $output .=  $this->submit_button($qa, $options, true);
+        $output = '';
 
-	return $output;
+        //Add the submit/save now buttons.
+        if($qa->get_state() == question_state::$needsgrading) {
+            $output .= $this->submit_button($qa, new question_display_options, 'reload', get_string('reloadnow', 'qbehaviour_adaptiveweighted_queued'), 'reloadnow');
+        }
+        else
+        {
+            $output .= $this->submit_button($qa, $options, 'submit', get_string('gradenow', 'qbehaviour_adaptiveweighted'), 'gradenow');
+            $output .= $this->submit_button($qa, $options, 'save', get_string('savenow', 'qbehaviour_adaptiveweighted'), 'savenow');
+        }
+
+
+        return $output;
     }
 
     /**
