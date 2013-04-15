@@ -24,7 +24,8 @@
  */
 
 $string['pluginname'] = 'Weighted adaptive with queued grading';
-$string['reloadnow']  = 'Reload (check grade)';
+$string['reloadnow']  = 'Refresh status...';
 
 $string['needsgrading'] = 'Grading now...';
+
 

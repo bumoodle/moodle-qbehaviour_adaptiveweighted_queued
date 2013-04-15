@@ -27,7 +27,7 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-require_once($CFG->dirroot.'/question/behaviour/adaptive/renderer.php');
+require_once($CFG->dirroot.'/question/behaviour/adaptiveweighted/renderer.php');
 
 /**
  * Renderer for outputting parts of a question belonging to the legacy
@@ -36,7 +36,7 @@ require_once($CFG->dirroot.'/question/behaviour/adaptive/renderer.php');
  * @copyright  2009 The Open University
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_renderer 
+class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptiveweighted_renderer 
 {
     /**
      * Several behaviours need a submit button, so put the common code here.
@@ -44,13 +44,10 @@ class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_re
      * @param question_display_options $options controls what should and should not be displayed.
      * @return string HTML fragment.
      */
-    protected function submit_button(question_attempt $qa, question_display_options $options, $button_name='submit', $button_text=null, $class='', $disabled=false) {
+    protected function submit_button(question_attempt $qa, question_display_options $options, $button_name='submit', $button_text=null, $class='', $disabled=null, $on_click = '') {
 
         //if no button text was provided, then use the default string
-        if($button_text === null) {
-            $button_text = get_string('gradenow', 'qbehaviour_adaptiveweighted');
-        }
-
+        $button_text = $button_text ?: get_string('gradenow', 'qbehaviour_adaptiveweighted');
 
         //compute the button's attributes
         $attributes = array
@@ -61,15 +58,14 @@ class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_re
             'value' => $button_text,
             'alt' => $button_text,
             'class' => 'submit btn '.$class,
+            'onclick' => $on_click
         );
 
-        //if the question is read-only, prevent the button from being clicked
-        if ($options->readonly || $disabled) {
+        //If disabled is explicitly set to false, never disable this question.
+        //If disabled is set to true, prevent the button from being clicked.
+        //If disabled is set to null (or an invalid value), use $options->readonly.
+        if (($options->readonly || $disabled === true) && $disabled !== false) {
             $attributes['disabled'] = 'disabled';
-        }
-
-        //and add the appropirate colorization
-        if ($disabled) {
             $attributes['class'] .= ' disabled';
         }
 
@@ -77,20 +73,22 @@ class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_re
         $output = html_writer::empty_tag('input', $attributes);
 
         //if this question isn't read-only, initialize the submit button routine, which prevents multiple submissions
-        if (!$options->readonly) 
+        if (!$options->readonly) {
             $this->page->requires->js_init_call('M.core_question_engine.init_submit_button', array($attributes['id'], $qa->get_slot()));
+        }
 
         //finally, return the rendered submit button
         return $output;
     }
 
-    public function controls(question_attempt $qa, question_display_options $options) 
-    {
+    public function controls(question_attempt $qa, question_display_options $options) {
         $output = '';
 
-        //Add the submit/save now buttons.
-        if($qa->get_state() == question_state::$needsgrading) {
-            $output .= $this->submit_button($qa, new question_display_options, 'reload', get_string('reloadnow', 'qbehaviour_adaptiveweighted_queued'), 'reloadnow');
+        //If we've waiting on grading and the attempt is open, add a "save" button labeled reload.
+        if($qa->get_state() == question_state::$complete) {
+            $output .= $this->submit_button($qa, $options, 'reload', get_string('reloadnow', 'qbehaviour_adaptiveweighted_queued'), 'reloadnow', false);
+        } else if($qa->get_state() == question_state::$needsgrading) {
+            $output .= $this->refresh_button($qa, $options);
         }
         else
         {
@@ -100,6 +98,31 @@ class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_re
 
 
         return $output;
+    }
+
+    /**
+     * Renders a "page refresh" button. This button will refresh the given page _without saving_, and is used to check the 
+     * grading status of queued grading question after an attempt has been finished.
+     */ 
+    protected function refresh_button(question_attempt $qa, question_display_options $options) {
+        $output .= $this->submit_button($qa, $options, 'reload', get_string('reloadnow', 'qbehaviour_adaptiveweighted_queued'), 'reloadnow', false, 'document.location.reload(true);');
+        return $output;
+    }
+
+
+    /**
+     * Display the scoring information about an adaptive attempt.
+     * @param qbehaviour_adaptive_mark_details contains all the score details we need.
+     * @param question_display_options $options display options.
+     */
+    public function render_adaptive_marks(qbehaviour_adaptive_mark_details $details, question_display_options $options) {
+
+        if ($details->state == question_state::$manfinished) {
+            return '';
+        } else {
+            return parent::render_adaptive_marks($details, $options);
+        }
+
     }
 
     /**
@@ -127,46 +150,4 @@ class qbehaviour_adaptiveweighted_queued_renderer extends qbehaviour_adaptive_re
         }
     }
 
-	/**
-	* Display the information about the penalty calculations.
-	* @param question_attempt $qa the question attempt.
-	* @param object $mark contains information about the current mark.
-	* @param question_display_options $options display options.
-	*/
-	protected function penalty_info(question_attempt $qa, $mark, question_display_options $options) 
-	{
-		//if no penalties have been set, return an empty string
-		if (!$qa->get_question()->penalty)
-			return '';
-		
-		$output = '';
-		
-		// Print details of grade adjustment due to penalties
-		if ($mark->raw != $mark->cur)
-			$output .= ' ' . get_string('gradingdetailsadjustment', 'qbehaviour_adaptive', $mark);
-		
-	
-		// Print information about any new penalty, only relevant if the answer can be improved.
-		if ($qa->get_behaviour()->is_state_improvable($qa->get_state())) 
-		{
-			//calculate the maximum score the student can still achieve
-			$maxpossible = $mark->max - $mark->max * $qa->get_last_behaviour_var('_sumpenalty', 0);
-			
-			$lastpenalty = $mark->max * $qa->get_last_behaviour_var('_lastpenalty', 0);
-			
-			//and return that, instead of penalty information
-			if($maxpossible > 0)
-			{
-				$output .= ' ' . get_string('gradingdetailsmaxpossible', 'qbehaviour_adaptiveweighted', array('lastpenalty' => format_float($lastpenalty, $options->markdp), 'maxpossible' => format_float(max($maxpossible, 0), $options->markdp), 'max' => $mark->max));
-			}
-			else
-			{
-				$output .= ' ' . get_string('gradingdetailspenalty', 'qbehaviour_adaptiveweighted', array('lastpenalty' => format_float($lastpenalty, $options->markdp), 'max' => $mark->max));
-			}
-		}
-			
-			//$output .= ' ' . get_string('gradingdetailspenalty', 'qbehaviour_adaptive', format_float($qa->get_last_behaviour_var('sumpenalty', 0), $options->markdp));
-	
-		return $output;
-	}
 }
